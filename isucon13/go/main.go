@@ -134,6 +134,10 @@ func main() {
 		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
 		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
 		newrelic.ConfigAppLogEnabled(false),
+		newrelic.ConfigAppLogEnabled(false),
+		func(config *newrelic.Config) {
+			config.DatastoreTracer.RawQuery.Enabled = true
+		},
 	)
 
 	e.Use(middleware.Logger())
