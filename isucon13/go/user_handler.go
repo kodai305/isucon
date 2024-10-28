@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -86,17 +85,6 @@ type PostIconResponse struct {
 	ID int64 `json:"id"`
 }
 
-const iconCacheDirectory = "/home/isucon/"
-
-func getIconFilePath(userID int64) string {
-	return filepath.Join(iconCacheDirectory, fmt.Sprintf("%d.jpg", userID))
-}
-
-func saveIconToFile(image []byte, userID int64) error {
-	filePath := getIconFilePath(userID)
-	return os.WriteFile(filePath, image, 0644)
-}
-
 func getIconHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
@@ -116,13 +104,6 @@ func getIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
 	}
 
-	// キャッシュファイルの存在確認
-	iconPath := getIconFilePath(user.ID)
-	if _, err := os.Stat(iconPath); err == nil {
-		// キャッシュファイルが存在する場合はそれを返す
-		return c.File(iconPath)
-	}
-
 	var image []byte
 	if err := tx.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", user.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -132,23 +113,7 @@ func getIconHandler(c echo.Context) error {
 		}
 	}
 
-	// キャッシュファイルに保存
-	go func() {
-		if err := saveIconToFile(image, user.ID); err != nil {
-			c.Logger().Errorf("failed to cache icon file: %v", err)
-		}
-	}()
-
 	return c.Blob(http.StatusOK, "image/jpeg", image)
-}
-
-// アイコンの更新時にキャッシュを削除するための関数
-func clearIconCache(userID int64) error {
-	iconPath := getIconFilePath(userID)
-	if err := os.Remove(iconPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove icon cache: %v", err)
-	}
-	return nil
 }
 
 func postIconHandler(c echo.Context) error {
@@ -174,12 +139,6 @@ func postIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	// 古いアイコンの削除前にキャッシュも削除
-	if err := clearIconCache(userID); err != nil {
-		c.Logger().Warnf("failed to clear icon cache: %v", err)
-		// キャッシュのクリアに失敗しても処理は続行
-	}
 
 	if _, err := tx.ExecContext(ctx, "DELETE FROM icons WHERE user_id = ?", userID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old user icon: "+err.Error())
