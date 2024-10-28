@@ -130,7 +130,7 @@ func main() {
 	// newrelic APM
 	var app *newrelic.Application
 	var err error
-	newrelic.NewApplication(
+	app, err = newrelic.NewApplication(
 		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
 		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
 		newrelic.ConfigAppLogEnabled(false),
