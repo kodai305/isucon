@@ -130,11 +130,20 @@ func main() {
 	// newrelic APM
 	var app *newrelic.Application
 	var err error
-	app, err = newrelic.NewApplication(
+	newrelic.NewApplication(
 		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
 		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
 		newrelic.ConfigAppLogEnabled(false),
+		newrelic.ConfigAppLogEnabled(false),
+		func(config *newrelic.Config) {
+			config.DatastoreTracer.RawQuery.Enabled = true
+		},
 	)
+	if err != nil {
+		fmt.Errorf("failed to init newrelic NewApplication reason: %v", err)
+	} else {
+		fmt.Println("newrelic init success")
+	}
 
 	e.Use(middleware.Logger())
 	cookieStore := sessions.NewCookieStore(secret)
