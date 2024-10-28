@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,6 +84,17 @@ type PostIconRequest struct {
 
 type PostIconResponse struct {
 	ID int64 `json:"id"`
+}
+
+const iconCacheDirectory = "/home/isucon/"
+
+func getIconFilePath(userID int64) string {
+	return filepath.Join(iconCacheDirectory, fmt.Sprintf("%d.jpg", userID))
+}
+
+func saveIconToFile(image []byte, userID int64) error {
+	filePath := getIconFilePath(userID)
+	return os.WriteFile(filePath, image, 0644)
 }
 
 func getIconHandler(c echo.Context) error {
