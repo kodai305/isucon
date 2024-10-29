@@ -172,15 +172,15 @@ func getUserStatisticsHandler(c echo.Context) error {
   INNER JOIN livecomments lc ON lc.livestream_id = l.id
   WHERE l.user_id = ?
   `
-	var stats struct {
+	var totalStats struct {
 		TotalLivecomments int64 `db:"total_livecomments"`
 		TotalTip          int64 `db:"total_tip"`
 	}
-	if err := tx.GetContext(ctx, &stats, livecommentStatsQuery, user.ID); err != nil {
+	if err := tx.GetContext(ctx, &totalStats, livecommentStatsQuery, user.ID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments stats: "+err.Error())
 	}
-	totalLivecomments = stats.TotalLivecomments
-	totalTip = stats.TotalTip
+	totalLivecomments = totalStats.TotalLivecomments
+	totalTip = totalStats.TotalTip
 
 	// 合計視聴者数
 	var viewersCount int64
