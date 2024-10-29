@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -66,8 +67,9 @@ func getUserStatisticsHandler(c echo.Context) error {
 	// echo.NewHTTPErrorが返っているのでそのまま出力
 	//return err
 	//}
-
+	// デバッグログ追加
 	username := c.Param("username")
+	log.Printf("Debug - Accessing statistics for username: %s", username)
 	// ユーザごとに、紐づく配信について、累計リアクション数、累計ライブコメント数、累計売上金額を算出
 	// また、現在の合計視聴者数もだす
 
@@ -85,6 +87,7 @@ func getUserStatisticsHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
 		}
 	}
+	log.Printf("Debug - Found user with ID: %d", user.ID) // デバッグログ
 
 	// ランク算出
 	var users []*UserModel
