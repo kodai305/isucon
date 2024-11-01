@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 
@@ -225,7 +223,9 @@ func postLivecommentHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
+	// error already checked
 	sess, _ := session.Get(defaultSessionIDKey, c)
+	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
 	var req *PostLivecommentRequest
@@ -293,59 +293,9 @@ func postLivecommentHandler(c echo.Context) error {
 	}
 	livecommentModel.ID = livecommentID
 
-	// ここでユーザー情報を完全に取得
-	var userModel UserModel
-	if err := tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE id = ?", userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
-	}
-
-	// テーマ情報を取得
-	var themeModel ThemeModel
-	if err := tx.GetContext(ctx, &themeModel, "SELECT * FROM themes WHERE user_id = ?", userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get theme: "+err.Error())
-	}
-
-	// アイコン情報を取得
-	var image []byte
-	if err := tx.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", userID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get icon: "+err.Error())
-		}
-		// アイコンが設定されていない場合はフォールバック画像を使用
-		var err error
-		image, err = os.ReadFile(fallbackImage)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to read fallback image: "+err.Error())
-		}
-	}
-	iconHash := sha256.Sum256(image)
-
-	// livestreamの情報を取得
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+	livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModel)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream: "+err.Error())
-	}
-
-	// レスポンスの構築
-	user := User{
-		ID:          userModel.ID,
-		Name:        userModel.Name,
-		DisplayName: userModel.DisplayName, // これが必要
-		Description: userModel.Description, // これが必要
-		Theme: Theme{
-			ID:       themeModel.ID,
-			DarkMode: themeModel.DarkMode,
-		},
-		IconHash: fmt.Sprintf("%x", iconHash),
-	}
-
-	livecomment := Livecomment{
-		ID:         livecommentID,
-		User:       user,
-		Livestream: livestream,
-		Comment:    req.Comment,
-		Tip:        req.Tip,
-		CreatedAt:  now,
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livecomment: "+err.Error())
 	}
 
 	if err := tx.Commit(); err != nil {
