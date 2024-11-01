@@ -75,6 +75,7 @@ func getLivecommentsHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	if err := verifyUserSession(c); err != nil {
+		// echo.NewHTTPErrorが返っているのでそのまま出力
 		return err
 	}
 
@@ -98,63 +99,23 @@ func getLivecommentsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	var livecommentModels []LivecommentModel
+	livecommentModels := []LivecommentModel{}
 	err = tx.SelectContext(ctx, &livecommentModels, query, livestreamID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return c.JSON(http.StatusOK, []Livecomment{})
+		return c.JSON(http.StatusOK, []*Livecomment{})
 	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	// バッチ処理のための準備
-	userIDs := make([]int64, len(livecommentModels))
-	for i, model := range livecommentModels {
-		userIDs[i] = model.UserID
-	}
-
-	// ユーザー情報を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct user query: "+err.Error())
-	}
-	query = tx.Rebind(query)
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get users: "+err.Error())
-	}
-
-	// ユーザー情報をマップに格納
-	userMap := make(map[int64]User)
-	for _, um := range userModels {
-		user, err := fillUserResponse(ctx, tx, um)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user: "+err.Error())
-		}
-		userMap[um.ID] = user
-	}
-
-	// 配信情報を取得（単一の配信なのでバッチ処理は不要）
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
-	}
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream: "+err.Error())
-	}
-
-	// レスポンスの構築
 	livecomments := make([]Livecomment, len(livecommentModels))
-	for i, model := range livecommentModels {
-		livecomments[i] = Livecomment{
-			ID:         model.ID,
-			User:       userMap[model.UserID],
-			Livestream: livestream,
-			Comment:    model.Comment,
-			Tip:        model.Tip,
-			CreatedAt:  model.CreatedAt,
+	for i := range livecommentModels {
+		livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModels[i])
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
 		}
+
+		livecomments[i] = livecomment
 	}
 
 	if err := tx.Commit(); err != nil {
