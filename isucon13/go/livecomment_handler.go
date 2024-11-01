@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -247,31 +248,27 @@ func postLivecommentHandler(c echo.Context) error {
 		}
 	}
 
-	// スパム判定の最適化
+	// スパム判定
 	var ngwords []*NGWord
 	if err := tx.SelectContext(ctx, &ngwords, "SELECT id, user_id, livestream_id, word FROM ng_words WHERE user_id = ? AND livestream_id = ?", livestreamModel.UserID, livestreamModel.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get NG words: "+err.Error())
 	}
 
-	// 効率的なスパムチェック
-	if len(ngwords) > 0 {
-		var patterns []string
-		args := []interface{}{req.Comment}
-		for _, ngword := range ngwords {
-			patterns = append(patterns, "text LIKE CONCAT('%', ?, '%')")
-			args = append(args, ngword.Word)
+	var hitSpam int
+	for _, ngword := range ngwords {
+		query := `
+		SELECT COUNT(*)
+		FROM
+		(SELECT ? AS text) AS texts
+		INNER JOIN
+		(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
+		ON texts.text LIKE patterns.pattern;
+		`
+		if err := tx.GetContext(ctx, &hitSpam, query, req.Comment, ngword.Word); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get hitspam: "+err.Error())
 		}
-		query := fmt.Sprintf(`
-			SELECT COUNT(*)
-			FROM (SELECT ? AS text) AS texts
-			WHERE %s
-		`, strings.Join(patterns, " OR "))
-
-		var hitCount int
-		if err := tx.GetContext(ctx, &hitCount, query, args...); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to check spam: "+err.Error())
-		}
-		if hitCount > 0 {
+		c.Logger().Infof("[hitSpam=%d] comment = %s", hitSpam, req.Comment)
+		if hitSpam >= 1 {
 			return echo.NewHTTPError(http.StatusBadRequest, "このコメントがスパム判定されました")
 		}
 	}
@@ -296,19 +293,50 @@ func postLivecommentHandler(c echo.Context) error {
 	}
 	livecommentModel.ID = livecommentID
 
-	// レスポンス構築の最適化
-	user, err := fillUserResponse(ctx, tx, UserModel{
-		ID:             userID,
-		Name:           sess.Values[defaultUsernameKey].(string),
-		HashedPassword: "", // 不要なフィールド
-	})
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user: "+err.Error())
+	// ここでユーザー情報を完全に取得
+	var userModel UserModel
+	if err := tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE id = ?", userID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
 	}
 
+	// テーマ情報を取得
+	var themeModel ThemeModel
+	if err := tx.GetContext(ctx, &themeModel, "SELECT * FROM themes WHERE user_id = ?", userID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get theme: "+err.Error())
+	}
+
+	// アイコン情報を取得
+	var image []byte
+	if err := tx.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", userID); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get icon: "+err.Error())
+		}
+		// アイコンが設定されていない場合はフォールバック画像を使用
+		var err error
+		image, err = os.ReadFile(fallbackImage)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to read fallback image: "+err.Error())
+		}
+	}
+	iconHash := sha256.Sum256(image)
+
+	// livestreamの情報を取得
 	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream: "+err.Error())
+	}
+
+	// レスポンスの構築
+	user := User{
+		ID:          userModel.ID,
+		Name:        userModel.Name,
+		DisplayName: userModel.DisplayName, // これが必要
+		Description: userModel.Description, // これが必要
+		Theme: Theme{
+			ID:       themeModel.ID,
+			DarkMode: themeModel.DarkMode,
+		},
+		IconHash: fmt.Sprintf("%x", iconHash),
 	}
 
 	livecomment := Livecomment{
