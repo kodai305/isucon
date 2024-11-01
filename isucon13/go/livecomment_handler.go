@@ -8,11 +8,18 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/v4"
+	"github.com/patrickmn/go-cache"
+)
+
+var (
+	// キャッシュの初期化（5分期限、10分に1回古いエントリを削除）
+	ngWordsCache = cache.New(5*time.Minute, 10*time.Minute)
 )
 
 type PostLivecommentRequest struct {
@@ -69,7 +76,6 @@ func getLivecommentsHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	if err := verifyUserSession(c); err != nil {
-		// echo.NewHTTPErrorが返っているのでそのまま出力
 		return err
 	}
 
@@ -93,23 +99,63 @@ func getLivecommentsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	livecommentModels := []LivecommentModel{}
+	var livecommentModels []LivecommentModel
 	err = tx.SelectContext(ctx, &livecommentModels, query, livestreamID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return c.JSON(http.StatusOK, []*Livecomment{})
+		return c.JSON(http.StatusOK, []Livecomment{})
 	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	livecomments := make([]Livecomment, len(livecommentModels))
-	for i := range livecommentModels {
-		livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
-		}
+	// バッチ処理のための準備
+	userIDs := make([]int64, len(livecommentModels))
+	for i, model := range livecommentModels {
+		userIDs[i] = model.UserID
+	}
 
-		livecomments[i] = livecomment
+	// ユーザー情報を一括取得
+	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct user query: "+err.Error())
+	}
+	query = tx.Rebind(query)
+	var userModels []UserModel
+	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get users: "+err.Error())
+	}
+
+	// ユーザー情報をマップに格納
+	userMap := make(map[int64]User)
+	for _, um := range userModels {
+		user, err := fillUserResponse(ctx, tx, um)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user: "+err.Error())
+		}
+		userMap[um.ID] = user
+	}
+
+	// 配信情報を取得（単一の配信なのでバッチ処理は不要）
+	var livestreamModel LivestreamModel
+	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	}
+	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream: "+err.Error())
+	}
+
+	// レスポンスの構築
+	livecomments := make([]Livecomment, len(livecommentModels))
+	for i, model := range livecommentModels {
+		livecomments[i] = Livecomment{
+			ID:         model.ID,
+			User:       userMap[model.UserID],
+			Livestream: livestream,
+			Comment:    model.Comment,
+			Tip:        model.Tip,
+			CreatedAt:  model.CreatedAt,
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -126,14 +172,18 @@ func getNgwords(c echo.Context) error {
 		return err
 	}
 
-	// error already checked
 	sess, _ := session.Get(defaultSessionIDKey, c)
-	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
 	livestreamID, err := strconv.Atoi(c.Param("livestream_id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
+	}
+
+	// キャッシュをチェック
+	cacheKey := fmt.Sprintf("ngwords:%d:%d", userID, livestreamID)
+	if cached, found := ngWordsCache.Get(cacheKey); found {
+		return c.JSON(http.StatusOK, cached.([]*NGWord))
 	}
 
 	tx, err := dbConn.BeginTxx(ctx, nil)
@@ -155,6 +205,9 @@ func getNgwords(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
+	// キャッシュに保存
+	ngWordsCache.Set(cacheKey, ngWords, cache.DefaultExpiration)
+
 	return c.JSON(http.StatusOK, ngWords)
 }
 
@@ -171,9 +224,7 @@ func postLivecommentHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
-	// error already checked
 	sess, _ := session.Get(defaultSessionIDKey, c)
-	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
 	var req *PostLivecommentRequest
@@ -196,27 +247,31 @@ func postLivecommentHandler(c echo.Context) error {
 		}
 	}
 
-	// スパム判定
+	// スパム判定の最適化
 	var ngwords []*NGWord
 	if err := tx.SelectContext(ctx, &ngwords, "SELECT id, user_id, livestream_id, word FROM ng_words WHERE user_id = ? AND livestream_id = ?", livestreamModel.UserID, livestreamModel.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get NG words: "+err.Error())
 	}
 
-	var hitSpam int
-	for _, ngword := range ngwords {
-		query := `
-		SELECT COUNT(*)
-		FROM
-		(SELECT ? AS text) AS texts
-		INNER JOIN
-		(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-		ON texts.text LIKE patterns.pattern;
-		`
-		if err := tx.GetContext(ctx, &hitSpam, query, req.Comment, ngword.Word); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get hitspam: "+err.Error())
+	// 効率的なスパムチェック
+	if len(ngwords) > 0 {
+		var patterns []string
+		args := []interface{}{req.Comment}
+		for _, ngword := range ngwords {
+			patterns = append(patterns, "text LIKE CONCAT('%', ?, '%')")
+			args = append(args, ngword.Word)
 		}
-		c.Logger().Infof("[hitSpam=%d] comment = %s", hitSpam, req.Comment)
-		if hitSpam >= 1 {
+		query := fmt.Sprintf(`
+			SELECT COUNT(*)
+			FROM (SELECT ? AS text) AS texts
+			WHERE %s
+		`, strings.Join(patterns, " OR "))
+
+		var hitCount int
+		if err := tx.GetContext(ctx, &hitCount, query, args...); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to check spam: "+err.Error())
+		}
+		if hitCount > 0 {
 			return echo.NewHTTPError(http.StatusBadRequest, "このコメントがスパム判定されました")
 		}
 	}
@@ -241,9 +296,28 @@ func postLivecommentHandler(c echo.Context) error {
 	}
 	livecommentModel.ID = livecommentID
 
-	livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModel)
+	// レスポンス構築の最適化
+	user, err := fillUserResponse(ctx, tx, UserModel{
+		ID:             userID,
+		Name:           sess.Values[defaultUsernameKey].(string),
+		HashedPassword: "", // 不要なフィールド
+	})
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livecomment: "+err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user: "+err.Error())
+	}
+
+	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream: "+err.Error())
+	}
+
+	livecomment := Livecomment{
+		ID:         livecommentID,
+		User:       user,
+		Livestream: livestream,
+		Comment:    req.Comment,
+		Tip:        req.Tip,
+		CreatedAt:  now,
 	}
 
 	if err := tx.Commit(); err != nil {
