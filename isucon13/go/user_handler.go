@@ -98,35 +98,34 @@ func getIconHandler(c echo.Context) error {
 
 	// JOINを使って1回のクエリで取得
 	query := `
-        SELECT i.image, i.image_hash
+        SELECT i.image
         FROM users u
         LEFT JOIN icons i ON u.id = i.user_id
         WHERE u.name = ?
     `
-	var (
-		image     []byte
-		imageHash sql.NullString
-	)
-	if err := tx.QueryRowContext(ctx, query, username).Scan(&image, &imageHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var image []byte
+	err = tx.GetContext(ctx, &image, query, username)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon: "+err.Error())
 	}
 
-	var currentHash string
+	// デフォルトアイコンの使用
 	if image == nil {
-		image, err = os.ReadFile(fallbackImage)
+		defaultImage, err := os.ReadFile(fallbackImage)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to read fallback image: "+err.Error())
 		}
-		h := sha256.Sum256(image)
-		currentHash = fmt.Sprintf("%x", h)
-	} else {
-		currentHash = imageHash.String
+		image = defaultImage
 	}
+
+	// ハッシュの計算
+	h := sha256.Sum256(image)
+	iconHash := fmt.Sprintf("%x", h)
 
 	// If-None-Matchヘッダーの確認
 	if ifNoneMatch := c.Request().Header.Get("If-None-Match"); ifNoneMatch != "" {
 		ifNoneMatch = strings.Trim(ifNoneMatch, "\"")
-		if currentHash == ifNoneMatch {
+		if iconHash == ifNoneMatch {
 			if err := tx.Commit(); err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 			}
@@ -138,11 +137,10 @@ func getIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
-	c.Response().Header().Set("ETag", "\""+currentHash+"\"")
+	c.Response().Header().Set("ETag", "\""+iconHash+"\"")
 	c.Response().Header().Set("Cache-Control", "public, max-age=2")
 	return c.Blob(http.StatusOK, "image/jpeg", image)
 }
-
 func postIconHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
