@@ -99,7 +99,6 @@ func saveIconToFile(image []byte, userID int64) error {
 
 func getIconHandler(c echo.Context) error {
 	ctx := c.Request().Context()
-
 	username := c.Param("username")
 
 	tx, err := dbConn.BeginTxx(ctx, nil)
@@ -108,23 +107,32 @@ func getIconHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var user UserModel
-	if err := tx.GetContext(ctx, &user, "SELECT * FROM users WHERE name = ?", username); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
-	}
-
+	// JOINを使って1回のクエリで取得
+	query := `
+      SELECT i.image
+      FROM users u
+      LEFT JOIN icons i ON u.id = i.user_id
+      WHERE u.name = ?
+    `
 	var image []byte
-	if err := tx.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", user.ID); err != nil {
+	if err := tx.GetContext(ctx, &image, query, username); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.File(fallbackImage)
-		} else {
+		} else if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon: "+err.Error())
 		}
 	}
 
+	if image == nil {
+		return c.File(fallbackImage)
+	}
+
+	// トランザクションをコミット
+	if err := tx.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
+	}
+
+	c.Response().Header().Set("Cache-Control", "public, max-age=3600") // 1時間キャッシュ
 	return c.Blob(http.StatusOK, "image/jpeg", image)
 }
 
