@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -83,7 +84,17 @@ func getLivecommentsHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
+	// まず配信の存在確認
+	var livestreamModel LivestreamModel
+	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	}
+
 	// ライブコメントの取得
+	var livecommentModels []LivecommentModel
 	query := "SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC"
 	if c.QueryParam("limit") != "" {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
@@ -93,38 +104,37 @@ func getLivecommentsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	var livecommentModels []LivecommentModel
-	err = tx.SelectContext(ctx, &livecommentModels, query, livestreamID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return c.JSON(http.StatusOK, []Livecomment{})
-	}
-	if err != nil {
+	if err := tx.SelectContext(ctx, &livecommentModels, query, livestreamID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	// ユーザーIDの収集
+	// コメントが0件の場合は空配列を返す
+	if len(livecommentModels) == 0 {
+		return c.JSON(http.StatusOK, []Livecomment{})
+	}
+
+	// ユーザー情報の一括取得
 	userIDs := make([]int64, 0, len(livecommentModels))
-	userIDMap := make(map[int64]struct{})
+	seen := make(map[int64]struct{})
 	for _, model := range livecommentModels {
-		if _, ok := userIDMap[model.UserID]; !ok {
+		if _, ok := seen[model.UserID]; !ok {
 			userIDs = append(userIDs, model.UserID)
-			userIDMap[model.UserID] = struct{}{}
+			seen[model.UserID] = struct{}{}
 		}
 	}
 
-	// ユーザー情報を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to create IN query: "+err.Error())
+	userModels := make([]UserModel, 0, len(userIDs))
+	query = "SELECT * FROM users WHERE id IN (?" + strings.Repeat(",?", len(userIDs)-1) + ")"
+	args := make([]interface{}, len(userIDs))
+	for i, id := range userIDs {
+		args[i] = id
 	}
-	query = tx.Rebind(query)
 
-	var userModels []UserModel
 	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get users: "+err.Error())
 	}
 
-	// ユーザー情報をマップに格納
+	// ユーザー情報をマップに変換
 	userMap := make(map[int64]User, len(userModels))
 	for _, um := range userModels {
 		user, err := fillUserResponse(ctx, tx, um)
@@ -134,11 +144,7 @@ func getLivecommentsHandler(c echo.Context) error {
 		userMap[um.ID] = user
 	}
 
-	// 配信情報を取得（1回だけ）
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
-	}
+	// 配信情報を取得
 	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream response: "+err.Error())
@@ -147,9 +153,13 @@ func getLivecommentsHandler(c echo.Context) error {
 	// レスポンスの構築
 	livecomments := make([]Livecomment, len(livecommentModels))
 	for i, model := range livecommentModels {
+		user, ok := userMap[model.UserID]
+		if !ok {
+			return echo.NewHTTPError(http.StatusInternalServerError, "user not found")
+		}
 		livecomments[i] = Livecomment{
 			ID:         model.ID,
-			User:       userMap[model.UserID],
+			User:       user,
 			Livestream: livestream,
 			Comment:    model.Comment,
 			Tip:        model.Tip,
