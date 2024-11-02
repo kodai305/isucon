@@ -127,7 +127,6 @@ func main() {
 	e.Debug = true
 	e.Logger.SetLevel(echolog.DEBUG)
 
-	// newrelic APM
 	var app *newrelic.Application
 	var err error
 	app, err = newrelic.NewApplication(
