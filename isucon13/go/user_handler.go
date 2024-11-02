@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -109,30 +110,50 @@ func getIconHandler(c echo.Context) error {
 
 	// JOINを使って1回のクエリで取得
 	query := `
-      SELECT i.image
-      FROM users u
-      LEFT JOIN icons i ON u.id = i.user_id
-      WHERE u.name = ?
+        SELECT i.image
+        FROM users u
+        LEFT JOIN icons i ON u.id = i.user_id
+        WHERE u.name = ?
     `
 	var image []byte
-	if err := tx.GetContext(ctx, &image, query, username); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return c.File(fallbackImage)
-		} else if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon: "+err.Error())
-		}
+	if err := tx.GetContext(ctx, &image, query, username); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon: "+err.Error())
 	}
 
 	if image == nil {
-		return c.File(fallbackImage)
+		defaultImage, err := os.ReadFile(fallbackImage)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to read fallback image: "+err.Error())
+		}
+		image = defaultImage
 	}
 
-	// トランザクションをコミット
+	// If-None-Matchヘッダーの確認
+	if ifNoneMatch := c.Request().Header.Get("If-None-Match"); ifNoneMatch != "" {
+		// "を削除
+		ifNoneMatch = strings.Trim(ifNoneMatch, "\"")
+		currentHash := fmt.Sprintf("%x", sha256.Sum256(image))
+
+		if currentHash == ifNoneMatch {
+			if err := tx.Commit(); err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
+			}
+			return c.NoContent(http.StatusNotModified)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
-	c.Response().Header().Set("Cache-Control", "public, max-age=3600") // 1時間キャッシュ
+	// ETagヘッダーを設定
+	iconHash := fmt.Sprintf("%x", sha256.Sum256(image))
+	c.Response().Header().Set("ETag", "\""+iconHash+"\"")
+
+	// キャッシュコントロールヘッダーの設定
+	// max-age=2 でアイコン更新の2秒以内反映ルールに対応
+	c.Response().Header().Set("Cache-Control", "public, max-age=2")
+
 	return c.Blob(http.StatusOK, "image/jpeg", image)
 }
 
@@ -140,13 +161,10 @@ func postIconHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	if err := verifyUserSession(c); err != nil {
-		// echo.NewHTTPErrorが返っているのでそのまま出力
 		return err
 	}
 
-	// error already checked
 	sess, _ := session.Get(defaultSessionIDKey, c)
-	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
 	var req *PostIconRequest
@@ -160,16 +178,18 @@ func postIconHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM icons WHERE user_id = ?", userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old user icon: "+err.Error())
-	}
-
-	rs, err := tx.ExecContext(ctx, "INSERT INTO icons (user_id, image) VALUES (?, ?)", userID, req.Image)
+	// UPSERTでアイコンを更新
+	query := `
+        INSERT INTO icons (user_id, image)
+        VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE image = VALUES(image)
+    `
+	result, err := tx.ExecContext(ctx, query, userID, req.Image)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to insert new user icon: "+err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to upsert user icon: "+err.Error())
 	}
 
-	iconID, err := rs.LastInsertId()
+	iconID, err := result.LastInsertId()
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get last inserted icon id: "+err.Error())
 	}
@@ -177,6 +197,11 @@ func postIconHandler(c echo.Context) error {
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
+
+	// キャッシュヘッダーを明示的に無効化
+	c.Response().Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Response().Header().Set("Pragma", "no-cache")
+	c.Response().Header().Set("Expires", "0")
 
 	return c.JSON(http.StatusCreated, &PostIconResponse{
 		ID: iconID,
