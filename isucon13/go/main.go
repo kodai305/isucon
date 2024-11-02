@@ -20,9 +20,6 @@ import (
 	"github.com/gorilla/sessions"
 	"github.com/labstack/echo-contrib/session"
 	echolog "github.com/labstack/gommon/log"
-	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
-	_ "github.com/newrelic/go-agent/v3/integrations/nrmysql"
-	"github.com/newrelic/go-agent/v3/newrelic"
 )
 
 const (
@@ -96,8 +93,8 @@ func connectDB(logger echo.Logger) (*sqlx.DB, error) {
 		conf.ParseTime = parseTime
 	}
 
-	db, err := sqlx.Open("nrmysql", conf.FormatDSN())
-	//db, err := sqlx.Open("mysql", conf.FormatDSN())
+	//db, err := sqlx.Open("nrmysql", conf.FormatDSN())
+	db, err := sqlx.Open("mysql", conf.FormatDSN())
 	if err != nil {
 		return nil, err
 	}
@@ -127,28 +124,10 @@ func main() {
 	e.Debug = true
 	e.Logger.SetLevel(echolog.DEBUG)
 
-	// newrelic APM
-	var app *newrelic.Application
-	var err error
-	app, err = newrelic.NewApplication(
-		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
-		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
-		newrelic.ConfigAppLogEnabled(false),
-		func(config *newrelic.Config) {
-			config.DatastoreTracer.RawQuery.Enabled = true
-		},
-	)
-	if err != nil {
-		fmt.Errorf("failed to init newrelic NewApplication reason: %v", err)
-	} else {
-		fmt.Println("newrelic init success")
-	}
-
 	e.Use(middleware.Logger())
 	cookieStore := sessions.NewCookieStore(secret)
 	cookieStore.Options.Domain = "*.t.isucon.pw"
 	e.Use(session.Middleware(cookieStore))
-	e.Use(nrecho.Middleware(app))
 	// e.Use(middleware.Recover())
 
 	// 初期化
