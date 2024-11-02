@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -37,7 +40,6 @@ func getReactionsHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	if err := verifyUserSession(c); err != nil {
-		// echo.NewHTTPErrorが返っているのでそのまま出力
 		return err
 	}
 
@@ -52,6 +54,17 @@ func getReactionsHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
+	// まず配信の存在確認とデータ取得
+	var livestreamModel LivestreamModel
+	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	}
+
+	// リアクションの取得
+	var reactionModels []ReactionModel
 	query := "SELECT * FROM reactions WHERE livestream_id = ? ORDER BY created_at DESC"
 	if c.QueryParam("limit") != "" {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
@@ -61,19 +74,66 @@ func getReactionsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	reactionModels := []ReactionModel{}
 	if err := tx.SelectContext(ctx, &reactionModels, query, livestreamID); err != nil {
-		return echo.NewHTTPError(http.StatusNotFound, "failed to get reactions")
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get reactions")
 	}
 
-	reactions := make([]Reaction, len(reactionModels))
-	for i := range reactionModels {
-		reaction, err := fillReactionResponse(ctx, tx, reactionModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill reaction: "+err.Error())
-		}
+	// リアクションが0件の場合は空配列を返す
+	if len(reactionModels) == 0 {
+		return c.JSON(http.StatusOK, []Reaction{})
+	}
 
-		reactions[i] = reaction
+	// ユーザー情報の一括取得
+	userIDs := make([]int64, 0, len(reactionModels))
+	seen := make(map[int64]struct{})
+	for _, model := range reactionModels {
+		if _, ok := seen[model.UserID]; !ok {
+			userIDs = append(userIDs, model.UserID)
+			seen[model.UserID] = struct{}{}
+		}
+	}
+
+	userModels := make([]UserModel, 0, len(userIDs))
+	query = "SELECT * FROM users WHERE id IN (?" + strings.Repeat(",?", len(userIDs)-1) + ")"
+	args := make([]interface{}, len(userIDs))
+	for i, id := range userIDs {
+		args[i] = id
+	}
+
+	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get users: "+err.Error())
+	}
+
+	// ユーザー情報をマップに変換
+	userMap := make(map[int64]User, len(userModels))
+	for _, um := range userModels {
+		user, err := fillUserResponse(ctx, tx, um)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user response: "+err.Error())
+		}
+		userMap[um.ID] = user
+	}
+
+	// 配信情報を取得
+	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream response: "+err.Error())
+	}
+
+	// レスポンスの構築
+	reactions := make([]Reaction, len(reactionModels))
+	for i, model := range reactionModels {
+		user, ok := userMap[model.UserID]
+		if !ok {
+			return echo.NewHTTPError(http.StatusInternalServerError, "user not found")
+		}
+		reactions[i] = Reaction{
+			ID:         model.ID,
+			EmojiName:  model.EmojiName,
+			User:       user,
+			Livestream: livestream,
+			CreatedAt:  model.CreatedAt,
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
