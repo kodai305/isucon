@@ -132,6 +132,7 @@ func getIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
+	c.Response().Header().Set("Cache-Control", "public, max-age=3600") // 1時間キャッシュ
 	return c.Blob(http.StatusOK, "image/jpeg", image)
 }
 
