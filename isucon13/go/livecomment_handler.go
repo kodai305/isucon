@@ -69,7 +69,6 @@ func getLivecommentsHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	if err := verifyUserSession(c); err != nil {
-		// echo.NewHTTPErrorが返っているのでそのまま出力
 		return err
 	}
 
@@ -84,6 +83,7 @@ func getLivecommentsHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
+	// ライブコメントの取得
 	query := "SELECT * FROM livecomments WHERE livestream_id = ? ORDER BY created_at DESC"
 	if c.QueryParam("limit") != "" {
 		limit, err := strconv.Atoi(c.QueryParam("limit"))
@@ -93,23 +93,68 @@ func getLivecommentsHandler(c echo.Context) error {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 
-	livecommentModels := []LivecommentModel{}
+	var livecommentModels []LivecommentModel
 	err = tx.SelectContext(ctx, &livecommentModels, query, livestreamID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return c.JSON(http.StatusOK, []*Livecomment{})
+		return c.JSON(http.StatusOK, []Livecomment{})
 	}
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	livecomments := make([]Livecomment, len(livecommentModels))
-	for i := range livecommentModels {
-		livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
+	// ユーザーIDの収集
+	userIDs := make([]int64, 0, len(livecommentModels))
+	userIDMap := make(map[int64]struct{})
+	for _, model := range livecommentModels {
+		if _, ok := userIDMap[model.UserID]; !ok {
+			userIDs = append(userIDs, model.UserID)
+			userIDMap[model.UserID] = struct{}{}
 		}
+	}
 
-		livecomments[i] = livecomment
+	// ユーザー情報を一括取得
+	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to create IN query: "+err.Error())
+	}
+	query = tx.Rebind(query)
+
+	var userModels []UserModel
+	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get users: "+err.Error())
+	}
+
+	// ユーザー情報をマップに格納
+	userMap := make(map[int64]User, len(userModels))
+	for _, um := range userModels {
+		user, err := fillUserResponse(ctx, tx, um)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user response: "+err.Error())
+		}
+		userMap[um.ID] = user
+	}
+
+	// 配信情報を取得（1回だけ）
+	var livestreamModel LivestreamModel
+	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	}
+	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestream response: "+err.Error())
+	}
+
+	// レスポンスの構築
+	livecomments := make([]Livecomment, len(livecommentModels))
+	for i, model := range livecommentModels {
+		livecomments[i] = Livecomment{
+			ID:         model.ID,
+			User:       userMap[model.UserID],
+			Livestream: livestream,
+			Comment:    model.Comment,
+			Tip:        model.Tip,
+			CreatedAt:  model.CreatedAt,
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -117,45 +162,6 @@ func getLivecommentsHandler(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, livecomments)
-}
-
-func getNgwords(c echo.Context) error {
-	ctx := c.Request().Context()
-
-	if err := verifyUserSession(c); err != nil {
-		return err
-	}
-
-	// error already checked
-	sess, _ := session.Get(defaultSessionIDKey, c)
-	// existence already checked
-	userID := sess.Values[defaultUserIDKey].(int64)
-
-	livestreamID, err := strconv.Atoi(c.Param("livestream_id"))
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
-	}
-
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
-	}
-	defer tx.Rollback()
-
-	var ngWords []*NGWord
-	if err := tx.SelectContext(ctx, &ngWords, "SELECT * FROM ng_words WHERE user_id = ? AND livestream_id = ? ORDER BY created_at DESC", userID, livestreamID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return c.JSON(http.StatusOK, []*NGWord{})
-		} else {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get NG words: "+err.Error())
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
-	}
-
-	return c.JSON(http.StatusOK, ngWords)
 }
 
 func postLivecommentHandler(c echo.Context) error {
