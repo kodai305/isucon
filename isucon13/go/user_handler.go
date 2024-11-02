@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -87,17 +86,6 @@ type PostIconResponse struct {
 	ID int64 `json:"id"`
 }
 
-const iconCacheDirectory = "/home/isucon/"
-
-func getIconFilePath(userID int64) string {
-	return filepath.Join(iconCacheDirectory, fmt.Sprintf("%d.jpg", userID))
-}
-
-func saveIconToFile(image []byte, userID int64) error {
-	filePath := getIconFilePath(userID)
-	return os.WriteFile(filePath, image, 0644)
-}
-
 func getIconHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 	username := c.Param("username")
@@ -110,30 +98,34 @@ func getIconHandler(c echo.Context) error {
 
 	// JOINを使って1回のクエリで取得
 	query := `
-        SELECT i.image
+        SELECT i.image, i.image_hash
         FROM users u
         LEFT JOIN icons i ON u.id = i.user_id
         WHERE u.name = ?
     `
-	var image []byte
-	if err := tx.GetContext(ctx, &image, query, username); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var (
+		image     []byte
+		imageHash sql.NullString
+	)
+	if err := tx.QueryRowContext(ctx, query, username).Scan(&image, &imageHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon: "+err.Error())
 	}
 
+	var currentHash string
 	if image == nil {
-		defaultImage, err := os.ReadFile(fallbackImage)
+		image, err = os.ReadFile(fallbackImage)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to read fallback image: "+err.Error())
 		}
-		image = defaultImage
+		h := sha256.Sum256(image)
+		currentHash = fmt.Sprintf("%x", h)
+	} else {
+		currentHash = imageHash.String
 	}
 
 	// If-None-Matchヘッダーの確認
 	if ifNoneMatch := c.Request().Header.Get("If-None-Match"); ifNoneMatch != "" {
-		// "を削除
 		ifNoneMatch = strings.Trim(ifNoneMatch, "\"")
-		currentHash := fmt.Sprintf("%x", sha256.Sum256(image))
-
 		if currentHash == ifNoneMatch {
 			if err := tx.Commit(); err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
@@ -146,14 +138,8 @@ func getIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
-	// ETagヘッダーを設定
-	iconHash := fmt.Sprintf("%x", sha256.Sum256(image))
-	c.Response().Header().Set("ETag", "\""+iconHash+"\"")
-
-	// キャッシュコントロールヘッダーの設定
-	// max-age=2 でアイコン更新の2秒以内反映ルールに対応
+	c.Response().Header().Set("ETag", "\""+currentHash+"\"")
 	c.Response().Header().Set("Cache-Control", "public, max-age=2")
-
 	return c.Blob(http.StatusOK, "image/jpeg", image)
 }
 
@@ -172,6 +158,10 @@ func postIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
+	// 画像のハッシュを計算
+	h := sha256.Sum256(req.Image)
+	imageHash := fmt.Sprintf("%x", h)
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
@@ -180,11 +170,11 @@ func postIconHandler(c echo.Context) error {
 
 	// UPSERTでアイコンを更新
 	query := `
-        INSERT INTO icons (user_id, image)
-        VALUES (?, ?)
-        ON DUPLICATE KEY UPDATE image = VALUES(image)
+        INSERT INTO icons (user_id, image, image_hash)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE image = VALUES(image), image_hash = VALUES(image_hash)
     `
-	result, err := tx.ExecContext(ctx, query, userID, req.Image)
+	result, err := tx.ExecContext(ctx, query, userID, req.Image, imageHash)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to upsert user icon: "+err.Error())
 	}
@@ -198,11 +188,7 @@ func postIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
-	// キャッシュヘッダーを明示的に無効化
 	c.Response().Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Response().Header().Set("Pragma", "no-cache")
-	c.Response().Header().Set("Expires", "0")
-
 	return c.JSON(http.StatusCreated, &PostIconResponse{
 		ID: iconID,
 	})
