@@ -29,6 +29,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
 	_ "github.com/newrelic/go-agent/v3/integrations/nrmysql"
+	_ "github.com/newrelic/go-agent/v3/integrations/nrsqlite3"
 	"github.com/newrelic/go-agent/v3/newrelic"
 )
 
@@ -82,7 +83,7 @@ func tenantDBPath(id int64) string {
 // テナントDBに接続する
 func connectToTenantDB(id int64) (*sqlx.DB, error) {
 	p := tenantDBPath(id)
-	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
+	db, err := sqlx.Open("nrsqlite3", fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
 	}
