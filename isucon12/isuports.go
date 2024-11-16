@@ -152,7 +152,7 @@ func Run() {
 		},
 	)
 	if er != nil {
-		fmt.Errorf("failed to init newrelic NewApplication reason: %v", err)
+		fmt.Errorf("failed to init newrelic NewApplication reason: %v", er)
 	} else {
 		fmt.Println("newrelic init success")
 	}
