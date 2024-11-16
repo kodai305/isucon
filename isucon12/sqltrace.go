@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+	"github.com/newrelic/go-agent/v3/integrations/nrsqlite3"
 	proxy "github.com/shogo82148/go-sql-proxy"
 )
 
@@ -18,6 +19,7 @@ var traceLogEncoder *json.Encoder
 
 func initializeSQLLogger() (string, io.Closer, error) {
 	traceFilePath := getEnv("ISUCON_SQLITE_TRACE_FILE", "")
+
 	if traceFilePath == "" {
 		return "sqlite3", io.NopCloser(nil), nil
 	}
@@ -30,7 +32,7 @@ func initializeSQLLogger() (string, io.Closer, error) {
 	traceLogEncoder = json.NewEncoder(traceLogFile)
 	traceLogEncoder.SetEscapeHTML(false)
 	driverName := "sqlite3-with-trace"
-	sql.Register(driverName, proxy.NewProxyContext(&sqlite3.SQLiteDriver{}, &proxy.HooksContext{
+	sql.Register(driverName, proxy.NewProxyContext(nrsqlite3.InstrumentSQLDriver(&sqlite3.SQLiteDriver{}), &proxy.HooksContext{
 		PreExec:   traceLogPre,
 		PostExec:  traceLogPostExec,
 		PreQuery:  traceLogPre,
