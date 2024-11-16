@@ -36,6 +36,7 @@ require (
 	github.com/newrelic/go-agent/v3 v3.35.1
 	github.com/newrelic/go-agent/v3/integrations/nrecho-v4 v1.1.2
 	github.com/newrelic/go-agent/v3/integrations/nrmysql v1.2.2
+	github.com/newrelic/go-agent/v3/integrations/nrsqlite3 v1.2.0
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.1 // indirect
