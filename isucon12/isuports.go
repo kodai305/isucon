@@ -27,6 +27,9 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
+	_ "github.com/newrelic/go-agent/v3/integrations/nrmysql"
+	"github.com/newrelic/go-agent/v3/newrelic"
 )
 
 const (
@@ -67,7 +70,7 @@ func connectAdminDB() (*sqlx.DB, error) {
 	config.DBName = getEnv("ISUCON_DB_NAME", "isuports")
 	config.ParseTime = true
 	dsn := config.FormatDSN()
-	return sqlx.Open("mysql", dsn)
+	return sqlx.Open("nrmysql", dsn)
 }
 
 // テナントDBのパスを返す
@@ -137,6 +140,23 @@ func Run() {
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
 
+	// newrelic APM
+	var app *newrelic.Application
+	var er error
+	app, er = newrelic.NewApplication(
+		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
+		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
+		newrelic.ConfigAppLogEnabled(false),
+		func(config *newrelic.Config) {
+			config.DatastoreTracer.RawQuery.Enabled = true
+		},
+	)
+	if er != nil {
+		fmt.Errorf("failed to init newrelic NewApplication reason: %v", err)
+	} else {
+		fmt.Println("newrelic init success")
+	}
+
 	var (
 		sqlLogger io.Closer
 		err       error
@@ -154,6 +174,7 @@ func Run() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(SetCacheControlPrivate)
+	e.Use(nrecho.Middleware(app))
 
 	// SaaS管理者向けAPI
 	e.POST("/api/admin/tenants/add", tenantsAddHandler)
