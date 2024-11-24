@@ -376,13 +376,17 @@ type GetRegisteredCourseResponseContent struct {
 
 // GetRegisteredCourses GET /api/users/me/courses 履修中の科目一覧取得
 func (h *handlers) GetRegisteredCourses(c echo.Context) error {
+	// New Relic transaction から context を取得
+	txn := nrecho.FromContext(c)
+	ctx := newrelic.NewContext(c.Request().Context(), txn)
+
 	userID, _, _, err := getUserInfo(c)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	tx, err := h.DB.Beginx()
+	tx, err := h.DB.Beginx(ctx, nil)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
