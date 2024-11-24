@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	_ "github.com/newrelic/go-agent/v3/integrations/nrmysql"
 )
 
 func GetDB(batch bool) (*sqlx.DB, error) {
@@ -18,5 +19,5 @@ func GetDB(batch bool) (*sqlx.DB, error) {
 	mysqlConfig.ParseTime = true
 	mysqlConfig.MultiStatements = batch
 
-	return sqlx.Open("mysql", mysqlConfig.FormatDSN())
+	return sqlx.Open("nrmysql", mysqlConfig.FormatDSN())
 }

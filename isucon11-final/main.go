@@ -19,6 +19,8 @@ import (
 	"github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
+	"github.com/newrelic/go-agent/v3/newrelic"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -40,9 +42,27 @@ func main() {
 	e.Server.Addr = fmt.Sprintf(":%v", GetEnv("PORT", "7000"))
 	e.HideBanner = true
 
+	// newrelic APM
+	var app *newrelic.Application
+	var er error
+	app, er = newrelic.NewApplication(
+		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
+		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
+		newrelic.ConfigAppLogEnabled(false),
+		func(config *newrelic.Config) {
+			config.DatastoreTracer.RawQuery.Enabled = true
+		},
+	)
+	if er != nil {
+		fmt.Errorf("failed to init newrelic NewApplication reason: %v", er)
+	} else {
+		fmt.Println("newrelic init success")
+	}
+
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(session.Middleware(sessions.NewCookieStore([]byte("trapnomura"))))
+	e.Use(nrecho.Middleware(app))
 
 	db, _ := GetDB(false)
 	db.SetMaxOpenConns(10)
