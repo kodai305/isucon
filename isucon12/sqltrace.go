@@ -12,6 +12,7 @@ import (
 
 	"github.com/mattn/go-sqlite3"
 	"github.com/newrelic/go-agent/v3/integrations/nrsqlite3"
+
 	proxy "github.com/shogo82148/go-sql-proxy"
 )
 
